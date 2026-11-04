@@ -1,6 +1,6 @@
 # Khoi Nguyen Lam · Photography & Video
 
-A map-based portfolio you can steer with your hand, using your computer's camera.
+A map-based portfolio you can steer with your hand, using your phone or computer's camera.
 
 ## Hand control
 

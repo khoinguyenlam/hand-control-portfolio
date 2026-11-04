@@ -969,7 +969,7 @@ html .lg{-webkit-backdrop-filter:var(--lg-filter) blur(3px) saturate(180%) brigh
 .hand-zoom output{min-width:3ch;text-align:right;font-variant-numeric:tabular-nums}
 .hand-cam video,.hand-cam canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
 .hand-cam span{position:absolute;left:8px;bottom:8px;padding:4px 8px;border-radius:999px;background:rgba(255,255,255,.88);
-  font:500 12px/1 var(--f-body);color:var(--paper)}
+  font:500 12px/1 var(--f-body);color:var(--paper);max-width:calc(100% - 16px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .hand-cursor{position:fixed;left:0;top:0;z-index:60;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;pointer-events:none;
   border:2.5px solid var(--tungsten);background:var(--tungsten-soft);box-shadow:0 0 0 1px rgba(255,255,255,.9);opacity:0;
   transition:opacity var(--t-fast) var(--ease-out),width var(--t-fast) var(--ease-out),height var(--t-fast) var(--ease-out),margin var(--t-fast) var(--ease-out)}
@@ -981,17 +981,27 @@ html .lg{-webkit-backdrop-filter:var(--lg-filter) blur(3px) saturate(180%) brigh
 .hand-size svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .hand-size .to-mini,.hand-cam.full .hand-size .to-full{display:none}
 .hand-cam.full .hand-size .to-mini{display:block}
-.hand-cam.full{z-index:70;inset:0;width:auto;aspect-ratio:auto;border-radius:0;background:#000;box-shadow:none}
+.hand-cam.full{z-index:70;inset:0;width:auto;aspect-ratio:auto!important;border-radius:0;background:#000;box-shadow:none}
 .hand-cam.full video,.hand-cam.full canvas{object-fit:contain}
 .hand-cam.full .hand-size{right:max(16px,env(safe-area-inset-right,0px));top:max(16px,env(safe-area-inset-top,0px));width:44px;height:44px}
 .hand-cam.full .hand-pick{top:max(22px,env(safe-area-inset-top,0px));left:16px;right:auto;max-width:min(320px,calc(100vw - 92px))}
 .hand-cam.full .hand-zoom{left:16px;right:auto;width:min(320px,calc(100vw - 32px));bottom:52px}
 .hand-cam.full span{left:16px;bottom:calc(16px + env(safe-area-inset-bottom,0px))}
-@media (max-width:520px){.hand-cam{width:160px}}
+@media (max-width:520px){.hand-cam{width:160px}.hand-cam:not(.full) .hand-pick,.hand-cam:not(.full) .hand-zoom{display:none}}
+.hand-cam.tall{width:150px}
+@media (max-width:520px){.hand-cam.tall{width:112px}}
+/* phones: the filter bar stays one row with Hand in it, and the preview sits above the legend, not over it */
+@media (max-width:520px){
+  .controls{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;max-width:calc(100vw - 32px)}
+  .controls::-webkit-scrollbar{display:none}
+  .controls .chip{flex:none;padding:0 8px!important;letter-spacing:.04em}
+  .hand-cam:not(.full){bottom:calc(28px + var(--readoutH,64px) + env(safe-area-inset-bottom,0px))}
+  body.hand-on .fullmap{bottom:calc(28px + var(--readoutH,64px) + var(--hand-cam-h,180px) + 12px + env(safe-area-inset-bottom,0px))}
+}
+.hand-cam.tall:not(.full) .hand-pick,.hand-cam.tall:not(.full) .hand-zoom{display:none}
 /* the camera preview takes the bottom-right corner; while it shows, Back to full map sits just above it
    (preview height is its width at 4:3, plus a 12px gap) */
-body.hand-on .fullmap{bottom:calc(18px + 180px + 12px + env(safe-area-inset-bottom,0px))}
-@media (max-width:520px){body.hand-on .fullmap{bottom:calc(18px + 120px + 12px + env(safe-area-inset-bottom,0px))}}
+body.hand-on .fullmap{bottom:calc(18px + var(--hand-cam-h,180px) + 12px + env(safe-area-inset-bottom,0px))}
 </style>
 
 <div id="stage" aria-label="Project map">
@@ -1132,8 +1142,9 @@ const btn=document.getElementById('handBtn'),camBox=document.getElementById('han
   overlay=document.getElementById('handOverlay'),octx=overlay.getContext('2d'),stateEl=document.getElementById('handState'),
   hintEl=document.getElementById('hint');
 const MP='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
-// only offered where a camera can actually be used: not on touch-only devices, and not where the frame forbids it
-const camAllowed=!!navigator.mediaDevices?.getUserMedia&&matchMedia('(pointer:fine)').matches&&
+// only offered where a camera can actually be used: not where the frame forbids it
+// (the iPhone/iPad app runs its own tracker, so the page's button stays hidden there)
+const camAllowed=!!navigator.mediaDevices?.getUserMedia&&!window.webkit?.messageHandlers?.handLog&&
   (document.featurePolicy?.allowsFeature?document.featurePolicy.allowsFeature('camera'):true);
 if(camAllowed)btn.hidden=false;
 
@@ -1146,7 +1157,7 @@ const sizeBtn=document.getElementById('handSize');
 function setFull(on){
   camBox.classList.toggle('full',on);
   sizeBtn.setAttribute('aria-label',on?'Make the camera small':'Show the camera full screen');sizeBtn.title=on?'Make small':'Full screen';
-  if(on)window.__hand?.frame(null);
+  if(on)window.__hand?.frame(null);else fitPreview();
 }
 sizeBtn.addEventListener('click',()=>setFull(!camBox.classList.contains('full')));
 // Esc leaves full screen only, without also closing whatever is open on the page behind it
@@ -1178,7 +1189,8 @@ async function start(){
     setState('Allow the camera');
     await openCamera();
     running=true;setState('Show your hand');
-    hintEl.textContent='Point to move · pinch to click · pinch empty space, then move up or down to zoom or scroll, or swipe left to go back';
+    hintEl.textContent='Move your hand to move · pinch to click · pinch empty space, then move up or down to zoom or scroll, or swipe left to go back';
+    keepAwake();
     rafId=requestAnimationFrame(loop);
   }catch(err){
     console.error('Hand control failed',err);
@@ -1190,9 +1202,27 @@ async function start(){
 // which camera to use; remembered on this browser so a chosen iPhone stays picked next time
 const pick=document.getElementById('handPick'),PREF='handCamera';
 let camId=null;try{camId=localStorage.getItem(PREF)}catch{}
+// the preview takes the camera picture's shape, which is tall on a phone held upright and changes as it turns
+function fitPreview(){
+  if(!video.videoWidth)return;
+  overlay.width=video.videoWidth;overlay.height=video.videoHeight;
+  const ar=video.videoWidth/video.videoHeight;
+  camBox.style.aspectRatio=String(ar);camBox.classList.toggle('tall',ar<1);
+  // the Back to full map button sits just above the preview
+  if(!camBox.classList.contains('full'))document.documentElement.style.setProperty('--hand-cam-h',camBox.offsetHeight+'px');
+}
+video.addEventListener('resize',fitPreview);
+// nothing touches the screen during hand control, so keep it from going to sleep
+let wakeLock=null;
+async function keepAwake(){try{wakeLock=await navigator.wakeLock?.request('screen')}catch{}}
+document.addEventListener('visibilitychange',()=>{
+  if(document.visibilityState!=='visible'||!running)return;
+  keepAwake();video.play().catch(()=>{}); // a phone pauses the camera while the page is in the background
+});
 async function openCamera(){
   stream?.getTracks().forEach(t=>t.stop());
-  const v={width:{ideal:1280},height:{ideal:720},frameRate:{ideal:60}};
+  // a touch device gets 30 frames a second: tracking can't use more there, and it saves battery and heat
+  const v={width:{ideal:1280},height:{ideal:720},frameRate:{ideal:matchMedia('(pointer:coarse)').matches?30:60}};
   if(camId)v.deviceId={exact:camId};else v.facingMode='user';
   try{stream=await navigator.mediaDevices.getUserMedia({video:v,audio:false})}
   catch(err){
@@ -1201,7 +1231,7 @@ async function openCamera(){
     camId=null;return openCamera();
   }
   video.srcObject=stream;await video.play();
-  overlay.width=video.videoWidth;overlay.height=video.videoHeight;
+  fitPreview();
   camId=stream.getVideoTracks()[0].getSettings().deviceId||camId;
   await listCameras();
   setupZoom();
@@ -1243,6 +1273,7 @@ function stop(){
   running=false;cancelAnimationFrame(rafId);
   lost();
   stream?.getTracks().forEach(t=>t.stop());stream=null;video.srcObject=null;
+  wakeLock?.release?.().catch(()=>{});wakeLock=null;
   setFull(false);btn.setAttribute('aria-pressed','false');camBox.classList.remove('on');document.body.classList.remove('hand-on');
   if(savedHint)hintEl.textContent=savedHint;
 }
