@@ -9,7 +9,7 @@ Press **Hand** in the top bar and allow the camera. Hand tracking runs entirely 
 - **Move your hand** to move the cursor
 - **Pinch** a marker or button to click it
 - **Pinch and hold** a marker or button, then move, to drag
-- **Pinch empty space**, then move up or down, to zoom the map or scroll
-- **Pinch empty space and swipe left** to go back
+- **Raise two fingers** (index and middle), then move up or down, to zoom the map or scroll
+- **Raise two fingers and flick left** to go back
 
 The arrows on the camera preview switch it between mini and full screen. The cursor pauses while the preview is full screen.

@@ -74,7 +74,8 @@ function glide(now) {
   const dt = Math.min(.05, (now - lastDraw) / 1000 || .016); lastDraw = now;
   if (now > tagUntil && tag.classList.contains('on')) tag.classList.remove('on');
   if (!live) { if (target) showTarget(null); return; }
-  if (++frameNo % 3 === 0 && !pinched) { // ~40 times a second is plenty
+  if (two) { scrollStep(dt); if (target) showTarget(null); }
+  else if (++frameNo % 3 === 0 && !pinched) { // ~40 times a second is plenty
     // a steady outline: stay on the current target until the cursor is clearly off it, so it doesn't
     // flicker between neighbouring buttons as the hand trembles
     let keep = false;
@@ -97,7 +98,7 @@ requestAnimationFrame(glide);
 // reach follows the hand's size: about REACH palm-widths of camera image cover the screen,
 // and that window slides along when the hand pushes past its edge
 const REACH = 3.2;
-let box = null, palmS = null;
+let box = null, palmS = null, rebaseBox = false;
 const P = (f, k) => [f.pts[k][0] * f.ar, f.pts[k][1]];
 // The pointing spot: the middle of all five fingertips and the knuckles. Averaging takes out most of the
 // shake of a grainy, dark picture, a finger the camera can't see barely shifts it, and it hardly moves as
@@ -121,7 +122,8 @@ function updateBox(f) {
   const [px, py] = ptr(f);
   if (!box) box = {x: px, y: py};
   // the new hand takes over from where the cursor already is, wherever in the picture that hand happens to be
-  if (f.switched && live) {
+  if ((f.switched || rebaseBox) && live) {
+    rebaseBox = false;
     box.x = px - (dx / innerWidth - .5) * 2 * hw / OVERSCAN;
     box.y = py - (dy / innerHeight - .5) * 2 * hh / OVERSCAN;
   }
@@ -155,6 +157,8 @@ const trace = m => { try { window.webkit?.messageHandlers?.handLog?.postMessage(
 function clickAt(x, y) {
   fire('pointermove', x, y);
   const down = fire('pointerdown', x, y); fire('mousedown', x, y);
+  // as a real click would, put the keyboard's focus on what was pressed (a search box, say)
+  down?.closest?.('input,textarea,select,button,a[href],[tabindex],[contenteditable]')?.focus?.();
   const up = fire('pointerup', x, y); fire('mouseup', x, y);
   // as with a real mouse, the click lands on what press and release share
   let el = down; while (el && up && !el.contains(up)) el = el.parentElement;
@@ -193,13 +197,23 @@ let ax = null, ay = null, lastX = 0, lastY = 0, lastXT = 0, resync = false; // a
 const gapHistory = [];
 // Targets: the marker or button a pinch would press from here — the one under the cursor (pressed
 // where the cursor is), or failing that the nearest within SNAP px (pressed at its centre).
-const CLICKABLE = '.pin, button, a[href], [role="button"], .thumb, .chip, summary, input, select, label';
+const CLICKABLE = '.pin, button, a[href], [role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="checkbox"], [onclick], .thumb, .chip, summary, input, select, textarea, label';
 const SNAP = 22;
 function findTarget(x, y) {
   const hit = document.elementFromPoint(x, y), direct = hit && hit.closest(CLICKABLE);
   if (direct) return {el: direct, c: [x, y]};
+  const all = document.querySelectorAll(CLICKABLE);
+  // a page with very many links: checking each one this often would slow it down, so look around the cursor instead
+  if (all.length > 300) {
+    for (const r of [SNAP / 2, SNAP]) for (let a = 0; a < 8; a++) {
+      const px = x + Math.cos(a * Math.PI / 4) * r, py = y + Math.sin(a * Math.PI / 4) * r;
+      const el = document.elementFromPoint(px, py)?.closest(CLICKABLE);
+      if (el) return {el, c: [px, py]};
+    }
+    return null;
+  }
   let best = null, bestD = SNAP;
-  for (const el of document.querySelectorAll(CLICKABLE)) {
+  for (const el of all) {
     const r = el.getBoundingClientRect();
     if (!r.width || !r.height || r.bottom < 0 || r.top > innerHeight || r.right < 0 || r.left > innerWidth) continue;
     const d = Math.hypot(Math.max(r.left - x, 0, x - r.right), Math.max(r.top - y, 0, y - r.bottom));
@@ -224,6 +238,87 @@ function lost() {
   cursor.classList.remove('on', 'zoom'); if (pinched) release();
   live = false; aim = null; prevGap = null; gapHistory.length = 0; ax = ay = null; press = null;
   fx.reset(); fy.reset(); history.length = 0; pinchFrames = 0; box = null; palmS = null;
+  two = null; poseSince = null; offSince = null; rebaseBox = false;
+}
+
+// Two fingers up (index and middle, like a trackpad): the cursor stops, and the hand scrolls and swipes.
+// Move up or down from where the fingers went up to scroll: the farther, the faster, and it keeps going while
+// held there, so there's no need to reposition the hand on a long page. A quick flick sideways goes back (left)
+// or forward (right). Pointing, an open hand and a pinch all look different, so none of them can set this off.
+const TWO_ENTER_MS = 200, TWO_EXIT_MS = 200, DEADZONE = .035, SCROLL_RATE = 7, FLICK = .16, FLICK_MS = 250;
+let two = null, poseSince = null, offSince = null;
+function isTwoFingers(f) {
+  const w = P(f, 'wrist'), reach = k => d2(P(f, k), w);
+  const up = n => reach(n + 'Tip') > reach(n + 'PIP') * 1.15, curled = n => reach(n + 'Tip') < reach(n + 'PIP') * 1.05;
+  return up('index') && up('middle') && curled('ring') && curled('little');
+}
+const palmAt = f => {
+  const a = P(f, 'indexMCP'), b = P(f, 'middleMCP'), c = P(f, 'littleMCP');
+  return [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3];
+};
+function scrollStep(dt) {
+  if (!two.v) return;
+  two.carry += two.v * dt;
+  const step = Math.trunc(two.carry);
+  if (!step) return;
+  two.carry -= step;
+  if (two.scroller?.id === 'stage') fire('wheel', dx, dy, {deltaY: step, deltaMode: 0});
+  else two.scroller?.scrollBy({top: step, behavior: 'instant'});
+}
+// Returns true while two fingers are in charge of this frame, so the cursor and pinch leave it alone.
+function twoFingers(f, t) {
+  const pose = isTwoFingers(f);
+  if (!two) {
+    if (!pose || pinched || f.sure === false) { poseSince = null; return false; }
+    poseSince ??= t;
+    if (t - poseSince < TWO_ENTER_MS) return false;
+    // curling the other fingers moved the cursor a little: go back to where it was just before
+    const b = history[0];
+    if (b) { cx = ax = b.cx; cy = ay = b.cy; }
+    const [x, y] = palmAt(f);
+    two = {y0: y, sy: y, v: 0, carry: 0, flicked: false, track: [{t, x, y}], scroller: scrollableAt(cx, cy)};
+    offSince = null; aim = null; pinchFrames = 0; gapHistory.length = 0; prevGap = null; poseSince = null;
+    cursor.classList.add('zoom');
+    showTag(two.scroller?.id === 'stage' ? 'Zoom' : 'Scroll', 800);
+    return true;
+  }
+  if (pose) offSince = null;
+  else {
+    offSince ??= t;
+    two.v = 0; // a hand on its way out of the pose doesn't scroll
+    if (t - offSince >= TWO_EXIT_MS) {
+      two = null; cursor.classList.remove('zoom');
+      // the hand has moved: the cursor stays where it is and carries on from here
+      rebaseBox = true; fx.reset(); fy.reset(); resync = true;
+      aim = {x: dx, y: dy, t, until: 250, release: true};
+      return false;
+    }
+    return true;
+  }
+  const [x, y] = palmAt(f);
+  two.sy += (y - two.sy) * .4;
+  two.track.push({t, x, y}); while (t - two.track[0].t > FLICK_MS) two.track.shift();
+  if (!two.flicked) {
+    const a = two.track[0], mx = x - a.x, my = y - a.y;
+    if (Math.abs(mx) > FLICK && Math.abs(mx) > 2 * Math.abs(my)) {
+      two.flicked = true; two.v = 0; // one flick per gesture, so bringing the hand back does nothing
+      if (mx < 0) {
+        if (window.__handBack) window.__handBack();
+        else document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true}));
+        showTag('Back');
+      } else if (window.__handForward) {
+        window.__handForward();
+        showTag('Forward');
+      }
+      trace(`flick ${mx < 0 ? 'back' : 'forward'}`);
+    }
+  }
+  const o = two.sy - two.y0, out = Math.max(0, Math.abs(o) - DEADZONE);
+  // a sideways flick isn't a scroll
+  const sideways = Math.abs(x - two.track[0].x) > .05;
+  two.v = two.flicked || sideways ? 0 : Math.sign(o) * Math.min(3000, out * innerHeight * SCROLL_RATE);
+  if (two.v) showTag(two.scroller?.id === 'stage' ? 'Zoom' : 'Scroll', 400);
+  return true;
 }
 
 // Which hand controls the cursor when two are in view: the same logic as ActiveHandPicker.swift, for the
@@ -284,10 +379,13 @@ window.__hand = {
     if (f.switched && live) {
       if (pinched) release();
       aim = null; prevGap = null; gapHistory.length = 0; pinchFrames = 0; palmS = null;
+      if (two) cursor.classList.remove('zoom');
+      two = null; poseSince = null;
       fx.reset(); fy.reset(); resync = true;
       showTag('Other hand', 700);
     }
     updateBox(f);
+    if (twoFingers(f, t)) return;
     const gap = f.gap;
     // A pinch starts only from a real closing motion of the fingers (which the aim lock has caught) or when
     // they clearly touch, so fingers drifting near each other never click on their own. Once that closing
@@ -363,8 +461,10 @@ window.__hand = {
       // swipe left while pinching: back, like swiping back on an iPhone
       if (!grab.moved && !grab.swiped && sx < -.12 && Math.abs(sx) > 2 * Math.abs(sy)) {
         grab.swiped = true;
-        // the page's own Escape handling closes a project, the About or List panel, or a zoomed group
-        document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true}));
+        // the page's own Escape handling closes a project, the About or List panel, or a zoomed group;
+        // the browser extension sets __handBack to go back a page instead
+        if (window.__handBack) window.__handBack();
+        else document.body.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true}));
         showTag('Back');
       }
       // up or down: zoom or scroll, only once the pinch has been held a moment and the hand has clearly

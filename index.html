@@ -1134,8 +1134,8 @@ body.hand-on .fullmap{bottom:calc(18px + var(--hand-cam-h,180px) + 12px + env(sa
 /* ---------- hand control ----------
    The front camera finds one hand (MediaPipe, entirely on this device) and replays it as mouse
    events, so the map, markers and buttons react exactly as they do to a real mouse:
-   point = move, pinch = click (hold to drag), index + middle up = zoom the map or scroll a panel,
-   fist = pause. Loaded only when the Hand button is pressed. The cursor itself (filtering, reach,
+   move the hand = move, pinch = click (hold to drag), two fingers up = zoom the map or scroll a panel,
+   and a flick left = back. Loaded only when the Hand button is pressed. The cursor itself (filtering, reach,
    pinch, aim lock, target outline, acceleration) is the same script the iPhone/iPad app uses, in
    hand-bridge.js; this part runs the camera and turns MediaPipe's landmarks into its frames. */
 const btn=document.getElementById('handBtn'),camBox=document.getElementById('handCam'),video=document.getElementById('handVideo'),
@@ -1189,7 +1189,7 @@ async function start(){
     setState('Allow the camera');
     await openCamera();
     running=true;setState('Show your hand');
-    hintEl.textContent='Move your hand to move · pinch to click · pinch empty space, then move up or down to zoom or scroll, or swipe left to go back';
+    hintEl.textContent='Move your hand to move · pinch to click · two fingers up, then move up or down to zoom or scroll, or flick left to go back';
     keepAwake();
     rafId=requestAnimationFrame(loop);
   }catch(err){
