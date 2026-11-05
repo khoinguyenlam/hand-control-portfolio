@@ -147,10 +147,11 @@ function fire(type, x, y, extra) {
   el.dispatchEvent(type.startsWith('pointer') ? new PointerEvent(type, o) : type === 'wheel' ? new WheelEvent(type, o) : new MouseEvent(type, o));
   return el;
 }
-// Click = a quick pinch, fired as the fingers open, on what was chosen as they started to close. A pinch
-// that's held does something else instead (drag a target, or on empty space zoom, scroll or swipe back),
-// and a long one clicks nothing, so fingers resting together stay harmless.
-const QUICK_MS = 700;
+// Click = a pinch, fired as the fingers open, on what was chosen as they started to close. Click is the default:
+// a hand always drifts a little during a pinch, so a drag starts only when the pinch has been held a moment and
+// the hand then moves well away, and keeps moving. Until then the cursor stays on the target. A very long pinch
+// with no movement clicks nothing, so fingers resting together stay harmless.
+const QUICK_MS = 1000, DRAG_AFTER_MS = 350, DRAG_PX = 45, DRAG_FRAMES = 3;
 let press = null, pinchMin = 99;
 // gesture trace for the app's diagnostic log; does nothing in a browser
 const trace = m => { try { window.webkit?.messageHandlers?.handLog?.postMessage(m); } catch {} };
@@ -168,7 +169,7 @@ function release() {
   const now = performance.now();
   pinched = false; pinchFrames = 0; anchor = null; cursor.classList.remove('down', 'zoom');
   // a quick pinch that didn't drag, zoom or swipe is a click on what it pressed
-  let quick = !!press && !press.dragging && now - press.t0 < QUICK_MS;
+  let quick = !!press && !press.dragging && !press.opened && now - press.t0 < QUICK_MS;
   if (grab) { if (grab.moved || grab.swiped) quick = false; grab = null; }
   if (downEl) { fire('pointerup', dx, dy); fire('mouseup', dx, dy); downEl = null; } // end of a drag
   trace(`release held=${press ? Math.round(now - press.t0) : -1} click=${quick} min=${pinchMin.toFixed(1)}`);
@@ -238,19 +239,25 @@ function lost() {
   cursor.classList.remove('on', 'zoom'); if (pinched) release();
   live = false; aim = null; prevGap = null; gapHistory.length = 0; ax = ay = null; press = null;
   fx.reset(); fy.reset(); history.length = 0; pinchFrames = 0; box = null; palmS = null;
-  two = null; poseSince = null; offSince = null; rebaseBox = false;
+  two = null; poseSince = null; poseKind = null; offSince = null; rebaseBox = false;
 }
 
 // Two fingers up (index and middle, like a trackpad): the cursor stops, and the hand scrolls and swipes.
 // Move up or down from where the fingers went up to scroll: the farther, the faster, and it keeps going while
 // held there, so there's no need to reposition the hand on a long page. A quick flick sideways goes back (left)
 // or forward (right). Pointing, an open hand and a pinch all look different, so none of them can set this off.
+// Three fingers up (browser extension only, where window.__handAction exists) work the browser itself: flick
+// left or right to change tab, flick up for a new tab, hold still to reload. Flicking down closes the tab only
+// if the fingers then stay up a moment, because simply lowering a hand looks much the same.
 const TWO_ENTER_MS = 200, TWO_EXIT_MS = 200, DEADZONE = .035, SCROLL_RATE = 7, FLICK = .16, FLICK_MS = 250;
-let two = null, poseSince = null, offSince = null;
-function isTwoFingers(f) {
+const RELOAD_HOLD_MS = 1200, CLOSE_HOLD_MS = 800, NEW_TAB_HOLD_MS = 1200;
+let two = null, poseSince = null, poseKind = null, offSince = null;
+function poseOf(f) {
   const w = P(f, 'wrist'), reach = k => d2(P(f, k), w);
   const up = n => reach(n + 'Tip') > reach(n + 'PIP') * 1.15, curled = n => reach(n + 'Tip') < reach(n + 'PIP') * 1.05;
-  return up('index') && up('middle') && curled('ring') && curled('little');
+  if (!up('index') || !up('middle') || !curled('little')) return null;
+  if (curled('ring')) return 'two';
+  return up('ring') && window.__handAction ? 'three' : null;
 }
 const palmAt = f => {
   const a = P(f, 'indexMCP'), b = P(f, 'middleMCP'), c = P(f, 'littleMCP');
@@ -265,24 +272,47 @@ function scrollStep(dt) {
   if (two.scroller?.id === 'stage') fire('wheel', dx, dy, {deltaY: step, deltaMode: 0});
   else two.scroller?.scrollBy({top: step, behavior: 'instant'});
 }
+function threeFingers(x, y, t) {
+  const act = (name, label) => { two.flicked = true; two.closeAt = 0; showTag(label); window.__handAction(name); trace('action ' + name); };
+  if (two.closeAt) {
+    if (t >= two.closeAt) act('closeTab', 'Close tab');
+    else showTag('Keep fingers up to close', 300);
+    return;
+  }
+  if (two.flicked) return;
+  const a = two.track[0], mx = x - a.x, my = y - a.y;
+  if (Math.abs(mx) > FLICK && Math.abs(mx) > 2 * Math.abs(my)) return act(mx < 0 ? 'previousTab' : 'nextTab', mx < 0 ? 'Previous tab' : 'Next tab');
+  if (Math.abs(my) > FLICK && Math.abs(my) > 2 * Math.abs(mx)) {
+    if (my < 0) return act('newTab', 'New tab');
+    two.closeAt = t + CLOSE_HOLD_MS; // moved down: only a sign of closing until the fingers stay up
+    return;
+  }
+  // holding still reloads; any real movement starts the wait again
+  if (Math.hypot(x - two.x0, y - two.y0) > .04) { two.x0 = x; two.y0 = y; two.t0 = t; }
+  const held = t - two.t0;
+  if (held >= RELOAD_HOLD_MS) act('reload', 'Reload');
+  else if (held > 400) showTag('Keep holding to reload', 300);
+}
+
 // Returns true while two fingers are in charge of this frame, so the cursor and pinch leave it alone.
 function twoFingers(f, t) {
-  const pose = isTwoFingers(f);
+  const kind = poseOf(f);
   if (!two) {
-    if (!pose || pinched || f.sure === false) { poseSince = null; return false; }
+    if (!kind || pinched || f.sure === false) { poseSince = null; return false; }
+    if (kind !== poseKind) { poseKind = kind; poseSince = t; }
     poseSince ??= t;
     if (t - poseSince < TWO_ENTER_MS) return false;
     // curling the other fingers moved the cursor a little: go back to where it was just before
     const b = history[0];
     if (b) { cx = ax = b.cx; cy = ay = b.cy; }
     const [x, y] = palmAt(f);
-    two = {y0: y, sy: y, v: 0, carry: 0, flicked: false, track: [{t, x, y}], scroller: scrollableAt(cx, cy)};
+    two = {kind, t0: t, x0: x, y0: y, sy: y, v: 0, carry: 0, flicked: false, closeAt: 0, track: [{t, x, y}], scroller: scrollableAt(cx, cy)};
     offSince = null; aim = null; pinchFrames = 0; gapHistory.length = 0; prevGap = null; poseSince = null;
     cursor.classList.add('zoom');
-    showTag(two.scroller?.id === 'stage' ? 'Zoom' : 'Scroll', 800);
+    showTag(kind === 'three' ? 'Tabs' : two.scroller?.id === 'stage' ? 'Zoom' : 'Scroll', 800);
     return true;
   }
-  if (pose) offSince = null;
+  if (kind === two.kind) offSince = null;
   else {
     offSince ??= t;
     two.v = 0; // a hand on its way out of the pose doesn't scroll
@@ -298,6 +328,7 @@ function twoFingers(f, t) {
   const [x, y] = palmAt(f);
   two.sy += (y - two.sy) * .4;
   two.track.push({t, x, y}); while (t - two.track[0].t > FLICK_MS) two.track.shift();
+  if (two.kind === 'three') { threeFingers(x, y, t); return true; }
   if (!two.flicked) {
     const a = two.track[0], mx = x - a.x, my = y - a.y;
     if (Math.abs(mx) > FLICK && Math.abs(mx) > 2 * Math.abs(my)) {
@@ -380,7 +411,7 @@ window.__hand = {
       if (pinched) release();
       aim = null; prevGap = null; gapHistory.length = 0; pinchFrames = 0; palmS = null;
       if (two) cursor.classList.remove('zoom');
-      two = null; poseSince = null;
+      two = null; poseSince = null; poseKind = null;
       fx.reset(); fy.reset(); resync = true;
       showTag('Other hand', 700);
     }
@@ -479,13 +510,24 @@ window.__hand = {
         showTag(onMap ? 'Zoom' : 'Scroll', 400);
       }
       cx = grab.x; cy = grab.y;
-    } else if (pinched && press && anchor && Math.hypot(cx - anchor.cx, cy - anchor.cy) > 12) {
-      // pinch held on a target and moved: drag it, pressing where the pinch began
+    } else if (pinched && press && anchor) {
+      const moved = Math.hypot(cx - anchor.cx, cy - anchor.cy);
       if (!press.dragging) {
-        press.dragging = true;
-        fire('pointermove', anchor.cx, anchor.cy); downEl = fire('pointerdown', anchor.cx, anchor.cy); fire('mousedown', anchor.cx, anchor.cy);
+        cx = anchor.cx; cy = anchor.cy; // stay on the target: this is still a click
+        press.away = moved > DRAG_PX && t - press.t0 > DRAG_AFTER_MS ? (press.away || 0) + 1 : 0;
+        if (press.away >= DRAG_FRAMES && !press.opened) {
+          press.dragging = true;
+          fire('pointermove', anchor.cx, anchor.cy); downEl = fire('pointerdown', anchor.cx, anchor.cy); fire('mousedown', anchor.cx, anchor.cy);
+          trace('drag');
+        } else if (!press.opened && window.__handAction && t - press.t0 > NEW_TAB_HOLD_MS && moved <= DRAG_PX &&
+                   press.el?.closest?.('a[href]')?.href) {
+          // a link pinched and held still opens in a new tab behind this one
+          press.opened = true;
+          window.__handAction('openLink', press.el.closest('a[href]').href);
+          showTag('Opened in new tab');
+        }
       }
-      showTag('Drag', 400);
+      if (press.dragging) { cx = ax; cy = ay; showTag('Drag', 400); }
     }
 
     if (changed && !pinched) {
