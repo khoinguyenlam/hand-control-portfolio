@@ -56,6 +56,7 @@ const history = [];
 // glides toward the latest target (cx, cy) on every screen frame instead of jumping once per camera frame,
 // and the page gets its mouse moves at the same smooth rate.
 let dx = cx, dy = cy, live = false, lastDraw = 0, frameNo = 0, target = null;
+let camGap = .033, lastFrameAt = 0; // seconds between camera frames, averaged
 const place = () => {
   cursor.style.transform = `translate3d(${dx}px,${dy}px,0)`;
   tag.style.transform = `translate3d(${Math.min(dx + 24, innerWidth - 90)}px,${dy + 18}px,0)`;
@@ -87,7 +88,9 @@ function glide(now) {
   }
   // sticky targets: over a button or marker the cursor moves more slowly, so small hand tremor
   // doesn't carry it off before the pinch
-  const k = 1 - Math.exp(-dt / (target && !pinched ? .12 : .035));
+  // the chase takes about as long as the wait for the next camera frame, so a slow camera (or a slow computer)
+  // gives one even glide rather than a dash and a stop on every frame
+  const k = 1 - Math.exp(-dt / Math.max(target && !pinched ? .12 : .035, camGap * .8));
   const nx = dx + (cx - dx) * k, ny = dy + (cy - dy) * k;
   if (Math.abs(nx - dx) + Math.abs(ny - dy) < .2) return;
   dx = nx; dy = ny; place();
@@ -415,6 +418,8 @@ window.__hand = {
       fx.reset(); fy.reset(); resync = true;
       showTag('Other hand', 700);
     }
+    if (lastFrameAt && t - lastFrameAt < 500) camGap += ((t - lastFrameAt) / 1000 - camGap) * .1;
+    lastFrameAt = t;
     updateBox(f);
     if (twoFingers(f, t)) return;
     const gap = f.gap;

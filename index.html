@@ -1163,10 +1163,13 @@ sizeBtn.addEventListener('click',()=>setFull(!camBox.classList.contains('full'))
 // Esc leaves full screen only, without also closing whatever is open on the page behind it
 addEventListener('keydown',e=>{if(e.key==='Escape'&&camBox.classList.contains('full')){e.stopPropagation();setFull(false)}},true);
 
+function loadScript(name){
+  return new Promise((ok,fail)=>{const s=document.createElement('script');s.src=new URL(name,document.baseURI);
+    s.onload=ok;s.onerror=()=>fail(new Error(name+' did not load'));document.head.append(s)});
+}
 function loadBridge(){
-  if(window.__hand)return Promise.resolve();
-  return new Promise((ok,fail)=>{const s=document.createElement('script');s.src=new URL('hand-bridge.js',document.baseURI);
-    s.onload=ok;s.onerror=()=>fail(new Error('hand-bridge.js did not load'));document.head.append(s)});
+  if(window.__hand&&window.makeFrameBoost)return Promise.resolve();
+  return Promise.all([loadScript('hand-bridge.js'),loadScript('frame-boost.js')]);
 }
 
 async function start(){
@@ -1182,7 +1185,7 @@ async function start(){
       for(let i=0;i<bin.length;i++)model[i]=bin.charCodeAt(i);
       makeLandmarker=delegate=>HandLandmarker.createFromOptions(fileset,{
         baseOptions:{modelAssetBuffer:model,delegate},
-        runningMode:'VIDEO',numHands:2,minHandDetectionConfidence:.3,minHandPresenceConfidence:.3,minTrackingConfidence:.3});
+        runningMode:'VIDEO',numHands:1,minHandDetectionConfidence:.3,minHandPresenceConfidence:.3,minTrackingConfidence:.3});
       landmarker=await makeLandmarker('GPU');
     }
     await loadBridge();
@@ -1286,7 +1289,9 @@ const JOINTS={wrist:0,thumbTip:4,indexMCP:5,indexPIP:6,indexTip:8,middleMCP:9,mi
 let misses=0,seen=false,lastVideoTime=-1,picker=null,lastGap=99;
 function lost(){misses=0;seen=false;lastGap=99;window.__hand?.frame(null)}
 
-let switching=false,errors=0;
+let switching=false,errors=0,boost=null;
+// Safari is many times quicker from a small copy of each frame than from the video itself
+const IS_SAFARI=/^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent);
 function loop(){
   if(!running)return;
   // schedule the next frame first, so one failed frame can never stop tracking for good
@@ -1296,7 +1301,8 @@ function loop(){
   if(video.currentTime===lastVideoTime)return;
   lastVideoTime=video.currentTime;const t=performance.now();
   try{
-    const r=landmarker.detectForVideo(video,t);
+    boost??=window.makeFrameBoost({width:IS_SAFARI?480:640,alwaysCopy:IS_SAFARI});
+    const r=landmarker.detectForVideo(boost.frame(video,video.videoWidth,video.videoHeight,t),t);
     errors=0;
     // with two hands in view, follow the one in control (the tracker's own order isn't stable)
     picker??=window.__handPicker();
@@ -1327,7 +1333,8 @@ function handle(lm,w,switched){
   const edge=['wrist','thumbTip','indexTip','middleTip','littleTip','littleMCP'].some(k=>{const[x,y]=pts[k];return x<.04||x>.96||y<.04||y>.96});
   const full=camBox.classList.contains('full');
   setState((edge?'Move toward the middle':'Tracking')+(full?' · cursor paused':''));
-  lastGap=dist3(w[4],w[8])*100;
+  // lightly smoothed: the gap is noisiest in a dark, grainy picture, where it could look like a pinch
+  const measured=dist3(w[4],w[8])*100;lastGap=lastGap>50?measured:lastGap+(measured-lastGap)*.6;
   if(full)return;
   window.__hand.frame({pts,ar:video.videoWidth/video.videoHeight||16/9,gap:lastGap,depth:true,edge,switched:!!switched});
 }
